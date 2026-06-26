@@ -1,0 +1,50 @@
+/* =======================================
+   HR Upload App — Custom Styles
+   ======================================= */
+
+/* Upload zone highlight */
+.uploadDropZone {
+    border: 2px dashed #0854A0;
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+    background: rgba(8, 84, 160, 0.04);
+    transition: all 0.2s ease;
+}
+.uploadDropZone:hover {
+    background: rgba(8, 84, 160, 0.08);
+    border-color: #0a6ed1;
+}
+
+/* Error text in preview table */
+.errorText {
+    color: #bb0000 !important;
+    font-style: italic;
+    font-size: 0.8125rem;
+}
+
+/* Row highlight for errors */
+.sapUiTableRowSel .errorText {
+    color: #ff4444 !important;
+}
+
+
+/* --- Modern Page Header Redesign --- */
+.timesheetPageHeader {
+    background: linear-gradient(135deg, #0d47a1 0%, #1976d2 50%, #42a5f5 100%);
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+    color: white;
+}
+
+.timesheetHeaderTitle {
+    color: white !important;
+    text-shadow: 1px 1px 3px rgba(0,0,0,0.3);
+    font-size: 1.5rem !important;
+    font-weight: bold;
+}
+
+.sapMPage {
+    background-color: #f5f6f7;
+}
