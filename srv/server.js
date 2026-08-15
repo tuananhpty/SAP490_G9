@@ -246,9 +246,10 @@ cds.on('bootstrap', app => {
         try {
             const axios = require('axios');
             const sapUrl = cds.env.requires.ZUI_NXR_SKILLREQ_O4.credentials.url;
-            const { ProfileIdentityLinks } = cds.entities('znxr09.db');
+            const db = await cds.connect.to('db');
+            const { ProfileIdentityLinks } = db.entities;
             const identityLink = ProfileIdentityLinks
-                ? await SELECT.one.from(ProfileIdentityLinks).where({ provider, subject })
+                ? await db.run(SELECT.one.from(ProfileIdentityLinks).where({ provider, subject }))
                 : null;
             if (identityLink && identityLink.active === false) {
                 return res.status(403).json({
