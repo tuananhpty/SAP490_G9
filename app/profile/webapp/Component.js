@@ -74,7 +74,8 @@ sap.ui.define([
 
             var fnLoadProfileAndHierarchy = function () {
                 var sEmail = oUserModel.getProperty("/email");
-                var sSapUserId = oUserModel.getProperty("/sapUserId") || sEmail;
+                var sSapUserId = (oUserModel.getProperty("/sapUserId") || sEmail).toUpperCase();
+
                 var oODataModel = that.getModel("odata");
 
                 if (!sSapUserId || !oODataModel) {
