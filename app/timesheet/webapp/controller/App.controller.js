@@ -53,6 +53,7 @@ sap.ui.define([
                 selectedTab: sInitialTab,
                 sideExpanded: true,
                 calendarBusy: false,
+                quotaBusy: false,
                 attMonth: String(oNow.getMonth() + 1),
                 attYear: String(oNow.getFullYear()),
                 reqViewMode: "employee", // Default view mode for Requests tab
@@ -65,9 +66,13 @@ sap.ui.define([
                 reqCountRejected: 0
             });
             this.getView().setModel(oViewModel, "view");
+            this.getView().setModel(new JSONModel({ available: false }), "quota");
 
             // Attach after rendering to load data
             this.getView().attachEventOnce("afterRendering", function () {
+                this.byId("attendanceCalendar").addEventDelegate({
+                    onAfterRendering: this._decorateOvertimeDates.bind(this)
+                });
                 this._loadAttendanceData();
             }.bind(this));
 
@@ -233,7 +238,185 @@ sap.ui.define([
                 String(oDate.getDate()).padStart(2, '0');
         },
 
-        getStatusInfo: function (iStatus, sShiftCode, oDate) {
+        getTimeKey: function (oDate) {
+            return String(oDate.getHours()).padStart(2, '0') + ':' +
+                String(oDate.getMinutes()).padStart(2, '0') + ':' +
+                String(oDate.getSeconds()).padStart(2, '0');
+        },
+
+        _formatOvertimeText: function (sOvertimeText) {
+            return String(sOvertimeText || "").replace(/(\d{2})(\d{2})(\d{2})/g, "$1:$2:$3");
+        },
+
+        _isSyncedOvertimeRequest: function (oRequest) {
+            var sStartTime = String(oRequest.CorrectedStartTime || "").replace(/\D/g, "");
+            var sEndTime = String(oRequest.CorrectedEndTime || "").replace(/\D/g, "");
+            return oRequest.RequestType === "OVERTIME"
+                && String(oRequest.Status) === "02"
+                && String(oRequest.SapPostStatus || "").toUpperCase() === "SUCCESS"
+                && Number(oRequest.Duration || 0) > 0
+                && sStartTime !== "" && sStartTime !== "000000"
+                && sEndTime !== "" && sEndTime !== "000000";
+        },
+
+        _getOvertimeForDateKey: function (sDateKey) {
+            var oScheduleRow = (this._aAttendanceData || []).find(function (oRow) {
+                return oRow.dateKey === sDateKey && oRow.hasOvertime;
+            });
+            if (oScheduleRow) return oScheduleRow;
+
+            var aRequests = (this._aRawRequests || []).filter(function (oRequest) {
+                var sStart = String(oRequest.StartDate || "").substring(0, 10);
+                var sEnd = String(oRequest.EndDate || oRequest.StartDate || "").substring(0, 10);
+                return this._isSyncedOvertimeRequest(oRequest)
+                    && sDateKey >= sStart && sDateKey <= sEnd;
+            }.bind(this));
+            if (!aRequests.length) return null;
+
+            return {
+                overtimeText: aRequests.map(function (oRequest) {
+                    return this._formatOvertimeText(
+                        String(oRequest.CorrectedStartTime || "") + " - "
+                        + String(oRequest.CorrectedEndTime || "")
+                    );
+                }.bind(this)).join("; "),
+                overtimeHours: aRequests.reduce(function (fTotal, oRequest) {
+                    return fTotal + Number(oRequest.Duration || 0);
+                }, 0),
+                hasOvertime: true
+            };
+        },
+
+        _parseCalendarDomDate: function (sRawDate) {
+            var sValue = String(sRawDate || "");
+            if (/^\d{8}$/.test(sValue)) {
+                return new Date(
+                    Number(sValue.substring(0, 4)),
+                    Number(sValue.substring(4, 6)) - 1,
+                    Number(sValue.substring(6, 8))
+                );
+            }
+            var oDate = new Date(Number(sValue));
+            return Number.isNaN(oDate.getTime()) ? null : oDate;
+        },
+
+        _decorateOvertimeDates: function () {
+            var oCalendar = this.byId("attendanceCalendar");
+            if (!oCalendar || !oCalendar.$().length) return;
+            var that = this;
+            oCalendar.$().find("[data-sap-day]").each(function () {
+                var oDate = that._parseCalendarDomDate(this.getAttribute("data-sap-day"));
+                if (!oDate) return;
+                var oOvertime = that._getOvertimeForDateKey(that.getDateKey(oDate));
+                this.classList.toggle("timesheetOtDate", Boolean(oOvertime));
+                if (oOvertime) this.setAttribute("title", "OT: " + oOvertime.overtimeText);
+            });
+        },
+
+        _getTimeSeconds: function (sTime) {
+            var sValue = String(sTime || "").trim();
+            var aDuration = sValue.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+            if (aDuration) {
+                return Number(aDuration[1] || 0) * 3600
+                    + Number(aDuration[2] || 0) * 60
+                    + Number(aDuration[3] || 0);
+            }
+            var sDigits = sValue.replace(/:/g, "");
+            if (!/^\d{4}(?:\d{2})?$/.test(sDigits)) return null;
+            var iHours = Number(sDigits.substring(0, 2));
+            var iMinutes = Number(sDigits.substring(2, 4));
+            var iSeconds = Number(sDigits.substring(4, 6) || 0);
+            if (iHours > 23 || iMinutes > 59 || iSeconds > 59) return null;
+            return iHours * 3600 + iMinutes * 60 + iSeconds;
+        },
+
+        _getOvertimeScheduleForDate: function (oDate) {
+            if (!oDate) return null;
+            var sDateKey = this.getDateKey(oDate);
+            return (this._aAttendanceData || []).find(function (oRow) {
+                return oRow.dateKey === sDateKey;
+            }) || null;
+        },
+
+        _validateOvertimeTimes: function (bShowMessage) {
+            var oView = this.getView();
+            var oDate = oView.byId("otDate").getDateValue();
+            var sStart = oView.byId("otStartTime").getValue();
+            var sEnd = oView.byId("otEndTime").getValue();
+            var iStart = this._getTimeSeconds(sStart);
+            var iEnd = this._getTimeSeconds(sEnd);
+            var fail = function (sMessage) {
+                oView.byId("otStartTime").setValueState(ValueState.Error);
+                oView.byId("otEndTime").setValueState(ValueState.Error);
+                oView.byId("otStartTime").setValueStateText(sMessage);
+                oView.byId("otEndTime").setValueStateText(sMessage);
+                if (bShowMessage) sap.m.MessageBox.error(sMessage);
+                return false;
+            };
+
+            if (iStart === null || iEnd === null) return fail("Please enter valid overtime start and end times.");
+            var iDuration = iEnd - iStart;
+            if (iDuration <= 0) iDuration += 24 * 60 * 60;
+            if (iDuration <= 0) return fail("Overtime duration must be greater than zero.");
+
+            var oSchedule = this._getOvertimeScheduleForDate(oDate);
+            var sShiftCode = String(oSchedule && oSchedule.shiftCode || "").toUpperCase();
+            var bNonWorking = !oSchedule || Boolean(oSchedule.isHoliday)
+                || !oSchedule.startTime || !oSchedule.endTime
+                || ["OFF", "FREE", "REST", "HOLIDAY", "NONWORK"].includes(sShiftCode);
+            if (!bNonWorking) {
+                var iScheduleStart = this._getTimeSeconds(oSchedule.startTime);
+                var iScheduleEnd = this._getTimeSeconds(oSchedule.endTime);
+                if (iScheduleStart !== null && iScheduleEnd !== null) {
+                    if (iScheduleEnd <= iScheduleStart) iScheduleEnd += 24 * 60 * 60;
+                    var iOvertimeEnd = iEnd;
+                    if (iOvertimeEnd <= iStart) iOvertimeEnd += 24 * 60 * 60;
+                    if (iStart < iScheduleEnd && iOvertimeEnd > iScheduleStart) {
+                        return fail("Overtime must be outside official working hours ("
+                            + oSchedule.startTime + "-" + oSchedule.endTime + ").");
+                    }
+                }
+            }
+
+            oView.byId("otStartTime").setValueState(ValueState.None);
+            oView.byId("otEndTime").setValueState(ValueState.None);
+            return true;
+        },
+
+        _getTimeMinutes: function (sTime) {
+            if (!sTime || sTime === "--:--") return null;
+            var aParts = String(sTime).split(":");
+            var iHours = Number(aParts[0]);
+            var iMinutes = Number(aParts[1]);
+            if (!Number.isFinite(iHours) || !Number.isFinite(iMinutes)) return null;
+            return iHours * 60 + iMinutes;
+        },
+
+        _getUnrequestedDayFraction: function (oRow) {
+            var iStatus = Number(oRow.status || 0);
+            if (iStatus === 3) return 1;
+            if (iStatus !== 2) return 0;
+
+            var iScheduledStart = this._getTimeMinutes(oRow.startTime);
+            var iScheduledEnd = this._getTimeMinutes(oRow.endTime);
+            var iActualStart = this._getTimeMinutes(oRow.actualStart);
+            var iActualEnd = this._getTimeMinutes(oRow.actualEnd);
+            if ([iScheduledStart, iScheduledEnd, iActualStart, iActualEnd].some(function (iValue) {
+                return iValue === null;
+            })) return 0;
+
+            var iScheduledHours = iScheduledEnd - iScheduledStart;
+            if (iScheduledHours <= 0) iScheduledHours += 24 * 60;
+            var iMissingMinutes = Math.max(0, iActualStart - iScheduledStart);
+            if (iActualEnd < iActualStart) iActualEnd += 24 * 60;
+            var iScheduledEndForComparison = iScheduledEnd;
+            if (iScheduledEndForComparison < iScheduledStart) iScheduledEndForComparison += 24 * 60;
+            iMissingMinutes += Math.max(0, iScheduledEndForComparison - iActualEnd);
+
+            return Math.min(1, iMissingMinutes / iScheduledHours);
+        },
+
+        getStatusInfo: function (iStatus, sShiftCode, oDate, bIsWfh) {
             // Type08 = Green, Type01 = Yellow/Orange, Type03 = Red, Type06 = Blue, Type09 = Grey
             var sCode = (sShiftCode || "").toUpperCase();
             var bIsOff = !sShiftCode || sCode === "OFF" || sCode === "FREE" || sCode === "";
@@ -243,21 +426,40 @@ sap.ui.define([
                 return { text: "Off / No Schedule", state: ValueState.None, type: "Type09" };
             }
 
+            var oToday = new Date();
+            oToday.setHours(0, 0, 0, 0);
+            var bIsToday = oDate && this.getDateKey(oDate) === this.getDateKey(oToday);
+
             switch (parseInt(iStatus, 10)) {
-                case 1: return { text: this.getText("statusFullAttendance"), state: ValueState.Success, type: "Type08" };
+                case 1: return { text: this.getText(bIsWfh ? "statusFullAttendanceWfh" : "statusFullAttendance"), state: ValueState.Success, type: "Type08" };
                 case 2: return { text: this.getText("statusLateLeaveEarly"), state: ValueState.Warning, type: "Type02" };
-                case 3: return { text: this.getText("statusAbsent"), state: ValueState.Error, type: "Type03" };
+                case 3:
+                    // A missing clock-in on the current day is still in progress,
+                    // not proof that the employee is absent.
+                    if (bIsToday) {
+                        return { text: this.getText("statusToday"), state: ValueState.Information, type: "Type06" };
+                    }
+                    return { text: this.getText("statusAbsent"), state: ValueState.Error, type: "Type03" };
                 case 4: return { text: "Leave (Full Day)", state: ValueState.Success, type: "Type08" };
                 case 5: return { text: "Leave (Partial)", state: ValueState.Warning, type: "Type02" };
                 default:
                     // Past workdays with no status → Absent; Future/today → Scheduled
-                    var oToday = new Date();
-                    oToday.setHours(0, 0, 0, 0);
                     if (oDate && oDate < oToday) {
                         return { text: this.getText("statusAbsent"), state: ValueState.Error, type: "Type03" };
                     }
-                    return { text: "Scheduled", state: ValueState.Information, type: "Type06" };
+                    return { text: this.getText(bIsToday ? "statusToday" : "statusScheduled"), state: ValueState.Information, type: "Type06" };
             }
+        },
+
+        _getApprovedRequestForDate: function (oDate, sRequestType) {
+            var sDateKey = this.getDateKey(oDate);
+            return (this._aRawRequests || []).find(function (oRequest) {
+                var sStart = String(oRequest.StartDate || "").substring(0, 10);
+                var sEnd = String(oRequest.EndDate || oRequest.StartDate || "").substring(0, 10);
+                return String(oRequest.Status) === "02"
+                    && (!sRequestType || oRequest.RequestType === sRequestType)
+                    && sStart && sDateKey >= sStart && sDateKey <= sEnd;
+            });
         },
 
         // ====== DATA FETCH ======
@@ -416,7 +618,18 @@ sap.ui.define([
                         actualEnd: this.formatTime(oRow.ActualEndTime),
                         isHoliday: oRow.IsHoliday,
                         leaveType: oRow.LeaveType,
-                        status: oRow.AttendanceStatus
+                        status: oRow.AttendanceStatus,
+                        quotaType: oRow.QuotaType,
+                        quotaName: oRow.QuotaName,
+                        quotaEntitlement: Number(oRow.QuotaEntitlement || 0),
+                        quotaUsed: Number(oRow.QuotaUsed || 0),
+                        quotaRemaining: Number(oRow.QuotaRemaining || 0),
+                        quotaUnit: oRow.QuotaUnit || "DAY",
+                         quotaValidFrom: oRow.QuotaValidFrom ? this.parseAbapDate(oRow.QuotaValidFrom) : null,
+                         quotaValidTo: oRow.QuotaValidTo ? this.parseAbapDate(oRow.QuotaValidTo) : null,
+                         hasOvertime: Boolean(oRow.HasOvertime),
+                         overtimeText: this._formatOvertimeText(oRow.OvertimeText),
+                         overtimeHours: Number(oRow.OvertimeHours || 0)
                     });
                 }.bind(this));
 
@@ -426,6 +639,7 @@ sap.ui.define([
                 });
                 this._applyCalendarColors();
                 this._updateAttendanceTable();
+                this._updateQuotaSummary();
             }.bind(this)).catch(function (oError) {
                 oViewModel.setProperty("/calendarBusy", false);
                 console.error("[WorkCalendar] Failed to load WorkSchedule", oError);
@@ -449,7 +663,9 @@ sap.ui.define([
             var aRawRequests = this._aRawRequests || [];
 
             var aTableData = aWorkdays.map(function (oData, iIndex) {
-                var oInfo = this.getStatusInfo(oData.status, oData.shiftCode, oData.date);
+                var bIsWfh = Boolean(this._getApprovedRequestForDate(oData.date, "WFH"));
+                var oOvertime = this._getOvertimeForDateKey(oData.dateKey);
+                var oInfo = this.getStatusInfo(oData.status, oData.shiftCode, oData.date, bIsWfh);
                 var bNoData = oData.actualStart === "--:--" || oData.actualEnd === "--:--" || (oData.actualStart === "00:00" && oData.actualEnd === "00:00");
                 
                 var sDateKey = oData.dateKey;
@@ -504,7 +720,7 @@ sap.ui.define([
 
                 return {
                     No: iIndex + 1,
-                    Date: oData.dateKey,
+                    Date: oData.dateKey + (oOvertime ? " *" : ""),
                     Checkin: oData.actualStart,
                     Checkout: oData.actualEnd,
                     StatusText: oInfo.text,
@@ -519,7 +735,95 @@ sap.ui.define([
 
             var oAttModel = new JSONModel({ rows: aTableData });
             this.getView().setModel(oAttModel, "att");
+            this._updateQuotaSummary();
             console.log("[MyAttendance] Showing", aTableData.length, "rows for", iMonth + "/" + iYear);
+        },
+
+        _updateQuotaSummary: function () {
+            var oViewModel = this.getView().getModel("view");
+            var iMonth = parseInt(oViewModel.getProperty("/attMonth"), 10);
+            var iYear = parseInt(oViewModel.getProperty("/attYear"), 10);
+            var oToday = new Date();
+            oToday.setHours(0, 0, 0, 0);
+            var sPeriodFrom = iYear + "-" + String(iMonth).padStart(2, "0") + "-01";
+            var oMonthEnd = new Date(iYear, iMonth, 0);
+            var sPeriodTo = iYear + "-" + String(iMonth).padStart(2, "0") + "-" + String(oMonthEnd.getDate()).padStart(2, "0");
+            var sAsOfDate = this.getDateKey(oToday);
+            var sEffectiveTo = sPeriodTo < sAsOfDate ? sPeriodTo : sAsOfDate;
+            var aRows = this._aAttendanceData || [];
+            var oQuotaRow = aRows.find(function (oRow) {
+                return oRow.quotaType || oRow.quotaEntitlement || oRow.quotaValidTo;
+            });
+
+            if (!oQuotaRow) {
+                this.getView().setModel(new JSONModel({
+                    quotaName: "Annual Leave",
+                    entitlement: "0.000",
+                    used: "0.000",
+                    remaining: "0.000",
+                    unit: "DAY",
+                    validFrom: "",
+                    validTo: "",
+                    requestedLeave: "0.000",
+                    unrequestedLeave: "0.000",
+                    periodText: sPeriodFrom + " - " + sPeriodTo,
+                    asOfDate: sAsOfDate,
+                    available: false
+                }), "quota");
+                return;
+            }
+
+            var aScheduledRows = aRows.filter(function (oRow) {
+                var sCode = String(oRow.shiftCode || "").toUpperCase();
+                return oRow.dateKey >= sPeriodFrom && oRow.dateKey <= sPeriodTo
+                    && sCode && !["OFF", "FREE", "REST", "HOLIDAY", "NONWORK"].includes(sCode)
+                    && !oRow.isHoliday && oRow.startTime && oRow.endTime
+                    && oRow.startTime !== "--:--" && oRow.endTime !== "--:--";
+            });
+            var oScheduledByDate = new Map(aScheduledRows.map(function (oRow) { return [oRow.dateKey, oRow]; }));
+            var oApprovedLeaveByDate = new Map();
+            (this._aRawRequests || []).forEach(function (oRequest) {
+                if (oRequest.RequestType !== "DAYOFF" || String(oRequest.Status) !== "02") return;
+                var sStart = String(oRequest.StartDate || "").slice(0, 10);
+                var sEnd = String(oRequest.EndDate || oRequest.StartDate || "").slice(0, 10);
+                if (!sStart || !sEnd) return;
+                var aDates = [];
+                var oDate = new Date(sStart + "T00:00:00");
+                var oEnd = new Date(sEnd + "T00:00:00");
+                while (oDate <= oEnd) {
+                    var sDate = this.getDateKey(oDate);
+                    if (sDate >= sPeriodFrom && sDate <= sPeriodTo && oScheduledByDate.has(sDate)) aDates.push(sDate);
+                    oDate.setDate(oDate.getDate() + 1);
+                }
+                var fDuration = Number(oRequest.Duration || 0);
+                var fPerDate = aDates.length > 0 ? fDuration / aDates.length : 0;
+                aDates.forEach(function (sDate) {
+                    oApprovedLeaveByDate.set(sDate, Math.max(oApprovedLeaveByDate.get(sDate) || 0, fPerDate));
+                });
+            }.bind(this));
+
+            var fRequested = Array.from(oApprovedLeaveByDate.values()).reduce(function (fTotal, fValue) {
+                return fTotal + fValue;
+            }, 0);
+            var fUnrequested = aScheduledRows.reduce(function (fTotal, oRow) {
+                if (oRow.dateKey > sEffectiveTo || oApprovedLeaveByDate.has(oRow.dateKey)) return fTotal;
+                return !oRow.leaveType ? fTotal + this._getUnrequestedDayFraction(oRow) : fTotal;
+            }.bind(this), 0);
+            var formatNumber = function (fValue) { return Number(fValue || 0).toFixed(3); };
+            this.getView().setModel(new JSONModel({
+                quotaName: oQuotaRow.quotaName || "Annual Leave",
+                entitlement: formatNumber(oQuotaRow.quotaEntitlement),
+                used: formatNumber(oQuotaRow.quotaUsed),
+                remaining: formatNumber(oQuotaRow.quotaRemaining),
+                unit: oQuotaRow.quotaUnit || "DAY",
+                validFrom: oQuotaRow.quotaValidFrom ? this.getDateKey(oQuotaRow.quotaValidFrom) : "",
+                validTo: oQuotaRow.quotaValidTo ? this.getDateKey(oQuotaRow.quotaValidTo) : "",
+                requestedLeave: formatNumber(fRequested),
+                unrequestedLeave: formatNumber(fUnrequested),
+                periodText: sPeriodFrom + " - " + sPeriodTo,
+                asOfDate: sAsOfDate,
+                available: true
+            }), "quota");
         },
 
         _applyCalendarColors: function () {
@@ -527,7 +831,8 @@ sap.ui.define([
             oCalendar.removeAllSpecialDates();
 
             this._aAttendanceData.forEach(function (oData) {
-                var oInfo = this.getStatusInfo(oData.status, oData.shiftCode, oData.date);
+                var bIsWfh = Boolean(this._getApprovedRequestForDate(oData.date, "WFH"));
+                var oInfo = this.getStatusInfo(oData.status, oData.shiftCode, oData.date, bIsWfh);
                 var bIsHoliday = oData.isHoliday;
                 var sCode = (oData.shiftCode || "").toUpperCase();
                 var bIsOff = !oData.shiftCode || sCode === "OFF" || sCode === "FREE" || sCode === "";
@@ -540,7 +845,7 @@ sap.ui.define([
                 oCalendar.addSpecialDate(new DateTypeRange({
                     startDate: oData.date,
                     type: sType,
-                    tooltip: oData.shiftCode || "Off"
+                    tooltip: oInfo.text
                 }));
             }.bind(this));
         },
@@ -620,7 +925,8 @@ sap.ui.define([
             this.byId("placeholderDetail").setVisible(false);
             this.byId("detailPanel").setVisible(true);
 
-            var oInfo = this.getStatusInfo(oData.status, oData.shiftCode, oData.date);
+            var bIsWfh = Boolean(this._getApprovedRequestForDate(oData.date, "WFH"));
+            var oInfo = this.getStatusInfo(oData.status, oData.shiftCode, oData.date, bIsWfh);
 
             // Format date string to English (e.g. DD/MM/YYYY)
             var sDateStr = String(oData.date.getDate()).padStart(2, '0') + '/' +
@@ -642,9 +948,18 @@ sap.ui.define([
                 this.byId("detActEnd").setText(oData.status === 3 ? "No Data" : oData.actualEnd);
             }
 
-            this.byId("detStatus").setText(oInfo.text);
-            this.byId("detStatus").setState(oInfo.state);
-        },
+             this.byId("detStatus").setText(oInfo.text);
+             this.byId("detStatus").setState(oInfo.state);
+
+            var oOvertime = this._getOvertimeForDateKey(oData.dateKey);
+             var oOvertimeLabel = this.byId("detOvertimeLabel");
+             var oOvertimeText = this.byId("detOvertime");
+             oOvertimeLabel.setVisible(Boolean(oOvertime));
+             oOvertimeText.setVisible(Boolean(oOvertime));
+             oOvertimeText.setText(oOvertime
+                 ? oOvertime.overtimeText + " (" + oOvertime.overtimeHours.toFixed(2) + " h)"
+                 : "");
+         },
 
         _hideDetail: function () {
             this.byId("placeholderDetail").setVisible(true);
@@ -788,6 +1103,7 @@ sap.ui.define([
                     oPicker.setValueStateText(sText || "");
                 }
             }.bind(this));
+            this._decorateOvertimeDates();
         },
 
         _validateRequestDateRange: function (sPrefix, bShowMessage) {
@@ -853,11 +1169,14 @@ sap.ui.define([
                 var sEndT = oView.byId("otEndTime").getValue();
                 
                 if (sStartT && sEndT) {
-                    var dStart = new Date("1970-01-01T" + sStartT + ":00");
-                    var dEnd = new Date("1970-01-01T" + sEndT + ":00");
-                    if (dEnd < dStart) dEnd.setDate(dEnd.getDate() + 1); // Cross midnight
-                    
-                    var diffHours = (dEnd - dStart) / (1000 * 60 * 60);
+                    var iStartSeconds = this._getTimeSeconds(sStartT);
+                    var iEndSeconds = this._getTimeSeconds(sEndT);
+                    var diffHours = 0;
+                    if (iStartSeconds !== null && iEndSeconds !== null) {
+                        var iDurationSeconds = iEndSeconds - iStartSeconds;
+                        if (iDurationSeconds <= 0) iDurationSeconds += 24 * 60 * 60;
+                        diffHours = iDurationSeconds / (60 * 60);
+                    }
                     oView.byId("otDuration").setValue(diffHours.toFixed(2));
                     
                     var breakHrs = 0;
@@ -866,6 +1185,7 @@ sap.ui.define([
                     else if (diffHours > 4) breakHrs = 1.0;
                     
                     oView.byId("otBreak").setValue(breakHrs.toFixed(1));
+                    this._validateOvertimeTimes(false);
                 }
                 this._loadApprover(0, sTab);
             } else if (sTab === "EDIT_TIMESHEET") {
@@ -896,6 +1216,11 @@ sap.ui.define([
                 oPayload.StartDate = this.getDateKey(doStart);
                 oPayload.EndDate = this.getDateKey(doEnd);
                 oPayload.Reason = doReason;
+                if (sTab === "WFH") {
+                    // WFH is posted to PA2002 and must carry the daily attendance times.
+                    oPayload.CorrectedStartTime = this.getTimeKey(doStart);
+                    oPayload.CorrectedEndTime = this.getTimeKey(doEnd);
+                }
             } else if (sTab === "EDIT_TIMESHEET") {
                 var etDate = oView.byId("etDate").getDateValue();
                 var etStart = oView.byId("etStartTime").getValue();
@@ -917,6 +1242,7 @@ sap.ui.define([
                 var otEnd = oView.byId("otEndTime").getValue();
                 var otReason = oView.byId("otReason").getValue();
                 if (!otDate || !otStart || !otEnd || !otReason) return sap.m.MessageToast.show(this.getText("msgFillRequired"));
+                if (!this._validateOvertimeTimes(true)) return;
                 
                 // Construct Date + Time
                 var dtStart = new Date(otDate);
@@ -929,6 +1255,8 @@ sap.ui.define([
 
                 oPayload.StartDate = this.getDateKey(dtStart);
                 oPayload.EndDate = this.getDateKey(dtEnd);
+                oPayload.CorrectedStartTime = otStart;
+                oPayload.CorrectedEndTime = otEnd;
                 oPayload.Reason = otReason;
             }
 
@@ -1075,6 +1403,7 @@ sap.ui.define([
 
                     // Save raw requests for attendance table calculation
                     this._aRawRequests = aResults;
+                    this._applyCalendarColors();
                     this._updateAttendanceTable();
 
                 }.bind(this),

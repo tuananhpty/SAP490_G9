@@ -37,3 +37,24 @@
     border-radius: 12px;
     border: none !important;
 }
+
+/* Keep the attendance color and add a visible marker for PA2005 overtime. */
+.sapUiCalItem.timesheetOtDate {
+    position: relative;
+}
+
+.sapUiCalItem.timesheetOtDate::after {
+    content: "OT";
+    position: absolute;
+    top: 0.15rem;
+    right: 0.2rem;
+    min-width: 1rem;
+    padding: 0.05rem 0.15rem;
+    border-radius: 0.2rem;
+    background: #bb0000;
+    color: #ffffff;
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 0.9rem;
+    z-index: 2;
+}

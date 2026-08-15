@@ -93,8 +93,60 @@ test('Create request rejects day-off and WFH ranges where end is before start', 
     assert.match(service, /req\.reject\(400, 'End Date\/Time cannot be earlier than Start Date\/Time\.'\)/);
 });
 
+test('Overtime sends the selected times and validates outside official working hours', () => {
+    assert.match(controller, /_validateOvertimeTimes: function/);
+    assert.match(controller, /Overtime must be outside official working hours/);
+    assert.match(controller, /oPayload\.CorrectedStartTime = otStart/);
+    assert.match(controller, /oPayload\.CorrectedEndTime = otEnd/);
+    assert.match(service, /validateAndCalculateOvertime/);
+    assert.match(service, /Overtime start and end times are required/);
+    assert.match(service, /Overtime must be outside official working hours/);
+    assert.match(service, /Overtime cannot exceed 40 hours in a calendar month/);
+});
+
+test('Calendar marks PA2005 overtime dates and shows the OT interval in details', () => {
+    assert.match(controller, /hasOvertime: Boolean\(oRow\.HasOvertime\)/);
+    assert.match(controller, /overtimeText: this\._formatOvertimeText\(oRow\.OvertimeText\)/);
+    assert.match(controller, /Date: oData\.dateKey \+ \(oOvertime \? " \*" : ""\)/);
+    assert.match(controller, /RequestType === "OVERTIME"/);
+    assert.match(controller, /SapPostStatus.*SUCCESS/);
+    assert.match(controller, /Number\(oRequest\.Duration \|\| 0\) > 0/);
+    assert.match(controller, /sStartTime !== "000000"/);
+    assert.match(controller, /\[data-sap-day\]/);
+    assert.match(controller, /timesheetOtDate/);
+    assert.match(controller, /detOvertimeLabel/);
+    assert.match(controller, /overtimeHours\.toFixed\(2\)/);
+    assert.match(view, /id="detOvertimeLabel"/);
+    assert.match(view, /id="detOvertime"/);
+});
+
 test('Work Calendar hides generated week-number index column', () => {
     assert.match(view, /id="attendanceCalendar"[\s\S]*?showWeekNumbers="false"/);
+});
+
+test('Calendar labels approved WFH and does not mark today absent', () => {
+    assert.match(controller, /getStatusInfo: function \(iStatus, sShiftCode, oDate, bIsWfh\)/);
+    assert.match(controller, /statusFullAttendanceWfh/);
+    assert.match(controller, /_getApprovedRequestForDate: function/);
+    assert.match(controller, /oRequest\.RequestType === sRequestType/);
+    assert.match(controller, /statusToday/);
+    assert.match(controller, /if \(bIsToday\)/);
+    assert.match(controller, /this\._applyCalendarColors\(\)/);
+    assert.match(service, /todayKey = new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
+    assert.match(service, /row\.AttendanceStatus = 0/);
+});
+
+test('Attendance details are rendered below the calendar in the left column', () => {
+    const calendarStart = view.indexOf('<!-- Work Calendar Section');
+    const calendarSection = view.slice(calendarStart, view.indexOf('<!-- My Requests Section'));
+    const calendarPosition = calendarSection.indexOf('id="attendanceCalendar"');
+    const detailPosition = calendarSection.indexOf('id="detailPanel"');
+    const rightColumnStart = calendarSection.indexOf('id="calendarCreateRequestButton"');
+
+    assert.ok(calendarPosition >= 0);
+    assert.ok(detailPosition > calendarPosition);
+    assert.ok(rightColumnStart > detailPosition);
+    assert.match(calendarSection, /id="detailPanel"[\s\S]*?id="placeholderDetail"/);
 });
 
 test('Embedded Timesheet navigation has an accessible collapse toggle', () => {
